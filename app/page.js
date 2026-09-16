@@ -8,95 +8,338 @@ export default function Home() {
   const [messages, setMessages] = useState([]);
   const [name, setName] = useState("");
   const [language, setLanguage] = useState("ta-IN");
+  const [reminders, setReminders] = useState([]);
 
-  // Register offline service worker
   useEffect(() => {
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker
         .register("/sw.js")
-        .then(() => {
-          console.log("Jorvis offline mode ready");
-        })
-        .catch((error) => {
-          console.log("Service worker registration failed:", error);
-        });
+        .catch((error) =>
+          console.log("Service worker error:", error)
+        );
     }
 
-    // Load local memory
-    const savedName = localStorage.getItem("ai_name") || "";
-    const savedLanguage =
-      localStorage.getItem("ai_language") || "ta-IN";
-    const savedMessages = JSON.parse(
-      localStorage.getItem("ai_messages") || "[]"
+    setName(localStorage.getItem("ai_name") || "");
+    setLanguage(
+      localStorage.getItem("ai_language") || "ta-IN"
     );
 
-    setName(savedName);
-    setLanguage(savedLanguage);
-    setMessages(savedMessages);
+    setMessages(
+      JSON.parse(
+        localStorage.getItem("ai_messages") || "[]"
+      )
+    );
+
+    setReminders(
+      JSON.parse(
+        localStorage.getItem("jorvis_reminders") || "[]"
+      )
+    );
+
+    requestNotificationPermission();
   }, []);
 
-  // Save chat locally
-  function saveMessages(next) {
-    setMessages(next);
-    localStorage.setItem("ai_messages", JSON.stringify(next));
+  function requestNotificationPermission() {
+    if (
+      "Notification" in window &&
+      Notification.permission === "default"
+    ) {
+      Notification.requestPermission().catch(() => {});
+    }
   }
 
-  // Offline voice reply
+  function saveMessages(next) {
+    setMessages(next);
+    localStorage.setItem(
+      "ai_messages",
+      JSON.stringify(next)
+    );
+  }
+
+  function saveReminders(next) {
+    setReminders(next);
+
+    localStorage.setItem(
+      "jorvis_reminders",
+      JSON.stringify(next)
+    );
+  }
+
   function speak(message) {
     if (!("speechSynthesis" in window)) return;
 
     window.speechSynthesis.cancel();
 
-    const utterance = new SpeechSynthesisUtterance(message);
+    const u = new SpeechSynthesisUtterance(message);
 
-    // Tamil voice automatically for Tamil text
-    if (/[\u0B80-\u0BFF]/.test(message)) {
-      utterance.lang = "ta-IN";
-    } else {
-      utterance.lang = "en-IN";
-    }
+    u.lang = /[\u0B80-\u0BFF]/.test(message)
+      ? "ta-IN"
+      : "en-IN";
 
-    utterance.rate = 0.95;
-    utterance.pitch = 1;
+    u.rate = 0.95;
+    u.pitch = 1;
 
-    window.speechSynthesis.speak(utterance);
+    window.speechSynthesis.speak(u);
   }
 
-  // Basic offline command engine
-  function respond(input) {
-    const q = input.toLowerCase().trim();
-    let answer;
+  // --------------------------------
+  // REMINDER PARSER
+  // --------------------------------
 
-    // -------------------------
-    // NAME
-    // -------------------------
+  function parseReminder(input) {
+    const q = input.toLowerCase();
 
-    if (q.startsWith("my name is ")) {
-      const n = input.slice(11).trim();
+    const reminderWords = [
+      "remind",
+      "reminder",
+      "நினைவுபடுத்த",
+      "ஞாபகப்படுத்த",
+      "remind பண்ணு",
+      "reminder வை",
+      "reminder வைக்க",
+    ];
 
-      localStorage.setItem("ai_name", n);
-      setName(n);
+    const isReminder = reminderWords.some((word) =>
+      q.includes(word)
+    );
 
-      answer = `Nice to meet you, ${n}. I will remember your name on this device.`;
+    if (!isReminder) return null;
+
+    let hour = null;
+    let minute = 0;
+
+    // 4:30 PM / 4 PM
+    const englishTime = q.match(
+      /\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)\b/
+    );
+
+    // 4 மணி / 4 மணிக்கு
+    const tamilTime = q.match(
+      /\b(\d{1,2})(?::(\d{2}))?\s*மணி(?:க்கு)?/
+    );
+
+    if (englishTime) {
+      hour = Number(englishTime[1]);
+      minute = Number(englishTime[2] || 0);
+
+      const period = englishTime[3];
+
+      if (period === "pm" && hour < 12) {
+        hour += 12;
+      }
+
+      if (period === "am" && hour === 12) {
+        hour = 0;
+      }
+    } else if (tamilTime) {
+      hour = Number(tamilTime[1]);
+      minute = Number(tamilTime[2] || 0);
     }
 
-    // Tamil name command
-    else if (q.includes("என் பெயர்") && !q.includes("என்ன")) {
-      const n = input
-        .replace(/என் பெயர்|என்பது|என்று/gi, "")
-        .trim();
+    if (hour === null) {
+      return null;
+    }
 
-      if (n) {
-        localStorage.setItem("ai_name", n);
-        setName(n);
+    const now = new Date();
+    const reminderDate = new Date(now);
 
-        answer = `சரி ${n}. உங்கள் பெயரை இந்த போனில் நினைவில் வைத்துக்கொள்கிறேன்.`;
-      } else {
-        answer = "உங்கள் பெயரை சொல்லுங்கள்.";
+    reminderDate.setHours(hour);
+    reminderDate.setMinutes(minute);
+    reminderDate.setSeconds(0);
+    reminderDate.setMilliseconds(0);
+
+    // "tomorrow" / "நாளைக்கு"
+    if (
+      q.includes("tomorrow") ||
+      q.includes("நாளைக்கு") ||
+      q.includes("நாளை")
+    ) {
+      reminderDate.setDate(
+        reminderDate.getDate() + 1
+      );
+    }
+
+    // If selected time already passed today,
+    // automatically move it to tomorrow.
+    else if (reminderDate <= now) {
+      reminderDate.setDate(
+        reminderDate.getDate() + 1
+      );
+    }
+
+    let title = input;
+
+    title = title
+      .replace(
+        /\b\d{1,2}(?::\d{2})?\s*(am|pm)\b/gi,
+        ""
+      )
+      .replace(
+        /\b\d{1,2}(?::\d{2})?\s*மணி(?:க்கு)?/gi,
+        ""
+      )
+      .replace(/remind me/gi, "")
+      .replace(/remind/gi, "")
+      .replace(/reminder/gi, "")
+      .replace(/tomorrow/gi, "")
+      .replace(/நாளைக்கு/g, "")
+      .replace(/நாளை/g, "")
+      .replace(/நினைவுபடுத்த/g, "")
+      .replace(/ஞாபகப்படுத்த/g, "")
+      .replace(/remind பண்ணு/gi, "")
+      .replace(/reminder வை/gi, "")
+      .replace(/reminder வைக்க/gi, "")
+      .replace(/பண்ணு/g, "")
+      .replace(/பண்ண/g, "")
+      .trim();
+
+    if (!title) {
+      title = "Jorvis reminder";
+    }
+
+    return {
+      title,
+      date: reminderDate,
+    };
+  }
+
+  // --------------------------------
+  // CREATE REMINDER
+  // --------------------------------
+
+  function createReminder(title, date) {
+    const reminder = {
+      id: Date.now(),
+      title,
+      time: date.getTime(),
+      completed: false,
+    };
+
+    const next = [
+      ...reminders,
+      reminder,
+    ];
+
+    saveReminders(next);
+
+    scheduleReminderNotification(reminder);
+
+    return reminder;
+  }
+
+  // --------------------------------
+  // NOTIFICATION
+  // --------------------------------
+
+  function scheduleReminderNotification(reminder) {
+    const delay =
+      reminder.time - Date.now();
+
+    if (delay <= 0) return;
+
+    if ("Notification" in window) {
+      if (
+        Notification.permission === "default"
+      ) {
+        Notification.requestPermission();
       }
     }
 
-    // Ask name
+    // Browser timers are best-effort.
+    // They may stop when iOS suspends the PWA.
+    setTimeout(() => {
+      if (
+        "Notification" in window &&
+        Notification.permission === "granted"
+      ) {
+        new Notification("Jorvis Reminder", {
+          body: reminder.title,
+        });
+      }
+
+      speak(
+        `Reminder. ${reminder.title}`
+      );
+    }, delay);
+  }
+
+  // --------------------------------
+  // MAIN COMMAND ENGINE
+  // --------------------------------
+
+  function respond(input) {
+    const q = input.toLowerCase().trim();
+
+    let answer;
+
+    // REMINDER
+    const reminder = parseReminder(input);
+
+    if (reminder) {
+      const created = createReminder(
+        reminder.title,
+        reminder.date
+      );
+
+      const formatted =
+        reminder.date.toLocaleTimeString(
+          "ta-IN",
+          {
+            hour: "numeric",
+            minute: "2-digit",
+          }
+        );
+
+      answer =
+        `சரி. ${formatted}க்கு reminder வைத்துவிட்டேன்: ${created.title}.`;
+    }
+
+    // NAME
+    else if (q.startsWith("my name is ")) {
+      const n = input
+        .slice(11)
+        .trim();
+
+      localStorage.setItem(
+        "ai_name",
+        n
+      );
+
+      setName(n);
+
+      answer =
+        `Nice to meet you, ${n}. I will remember your name on this device.`;
+    }
+
+    // TAMIL NAME
+    else if (
+      q.includes("என் பெயர்") &&
+      !q.includes("என்ன")
+    ) {
+      const n = input
+        .replace(
+          /என் பெயர்|என்பது|என்று/gi,
+          ""
+        )
+        .trim();
+
+      if (n) {
+        localStorage.setItem(
+          "ai_name",
+          n
+        );
+
+        setName(n);
+
+        answer =
+          `சரி ${n}. உங்கள் பெயரை நினைவில் வைத்துக்கொண்டேன்.`;
+      } else {
+        answer =
+          "உங்கள் பெயரை சொல்லுங்கள்.";
+      }
+    }
+
+    // ASK NAME
     else if (
       q.includes("what is my name") ||
       q.includes("என் பெயர் என்ன")
@@ -106,10 +349,7 @@ export default function Home() {
         : "நீங்கள் இன்னும் உங்கள் பெயரை சொல்லவில்லை.";
     }
 
-    // -------------------------
     // GREETING
-    // -------------------------
-
     else if (
       q.includes("hello") ||
       q.includes("hi") ||
@@ -120,10 +360,7 @@ export default function Home() {
         : "வணக்கம். நான் Jorvis. எப்படி உதவலாம்?";
     }
 
-    // -------------------------
     // TIME
-    // -------------------------
-
     else if (
       q.includes("time") ||
       q.includes("நேரம்")
@@ -145,10 +382,7 @@ export default function Home() {
           )}.`;
     }
 
-    // -------------------------
     // DATE
-    // -------------------------
-
     else if (
       q.includes("date") ||
       q.includes("today") ||
@@ -156,7 +390,8 @@ export default function Home() {
       q.includes("இன்று")
     ) {
       answer =
-        q.includes("தேதி") || q.includes("இன்று")
+        q.includes("தேதி") ||
+        q.includes("இன்று")
           ? `இன்று ${new Date().toLocaleDateString(
               "ta-IN",
               {
@@ -177,16 +412,18 @@ export default function Home() {
             )}.`;
     }
 
-    // -------------------------
     // CLEAR MEMORY
-    // -------------------------
-
     else if (
       q.includes("clear memory") ||
       q.includes("நினைவுகளை அழி")
     ) {
-      localStorage.removeItem("ai_name");
-      localStorage.removeItem("ai_messages");
+      localStorage.removeItem(
+        "ai_name"
+      );
+
+      localStorage.removeItem(
+        "ai_messages"
+      );
 
       setName("");
       setMessages([]);
@@ -195,17 +432,14 @@ export default function Home() {
         "சரி. இந்த போனில் சேமித்த நினைவுகளை அழித்துவிட்டேன்.";
     }
 
-    // -------------------------
-    // OFFLINE FALLBACK
-    // -------------------------
-
+    // FALLBACK
     else {
-      answer = /[\u0B80-\u0BFF]/.test(input)
-        ? "இந்த command-ஐ இன்னும் offline-ஆ புரிந்துகொள்ள கற்றுக்கொடுக்கவில்லை. Time, date, name அல்லது greeting முயற்சி செய்யுங்கள்."
-        : "I am currently working in offline mode. Try commands for your name, time, date, or greetings.";
+      answer =
+        /[\u0B80-\u0BFF]/.test(input)
+          ? "இந்த command-ஐ இன்னும் offline-ஆ புரிந்துகொள்ளவில்லை. Reminder, time, date, name அல்லது greeting முயற்சி செய்யுங்கள்."
+          : "I am currently working in offline mode. Try a reminder, name, time, date, or greeting command.";
     }
 
-    // Save conversation locally
     const next = [
       ...messages,
       {
@@ -220,13 +454,12 @@ export default function Home() {
 
     saveMessages(next);
 
-    // Speak answer
     speak(answer);
   }
 
-  // -------------------------
-  // VOICE INPUT
-  // -------------------------
+  // --------------------------------
+  // VOICE
+  // --------------------------------
 
   function startVoice() {
     const SpeechRecognition =
@@ -240,28 +473,27 @@ export default function Home() {
       return;
     }
 
-    const recognition = new SpeechRecognition();
+    const recognition =
+      new SpeechRecognition();
 
     recognition.lang = language;
     recognition.interimResults = false;
     recognition.continuous = false;
     recognition.maxAlternatives = 1;
 
-    recognition.onstart = () => {
+    recognition.onstart = () =>
       setListening(true);
-    };
 
-    recognition.onend = () => {
+    recognition.onend = () =>
       setListening(false);
-    };
 
-    recognition.onerror = () => {
+    recognition.onerror = () =>
       setListening(false);
-    };
 
     recognition.onresult = (event) => {
       const value =
-        event.results[0][0].transcript;
+        event.results[0][0]
+          .transcript;
 
       setText(value);
 
@@ -275,7 +507,6 @@ export default function Home() {
     <main className="page">
       <section className="card">
 
-        {/* HEADER */}
         <div className="top">
           <div>
             <div className="eyebrow">
@@ -285,8 +516,8 @@ export default function Home() {
             <h1>Jorvis</h1>
 
             <p>
-              Offline Personal Assistant • Tamil +
-              English
+              Offline Personal Assistant •
+              Tamil + English
             </p>
           </div>
 
@@ -295,16 +526,16 @@ export default function Home() {
           </div>
         </div>
 
-        {/* CHAT */}
         <div className="chat">
           {messages.length === 0 ? (
             <div className="empty">
               <strong>Ready.</strong>
 
               <span>
-                Try “What is the time?”,
-                “நேரம் என்ன?”, or
-                “என் பெயர் Jeff”.
+                Try “4 PM reminder to call
+                Arun” or “நாளைக்கு 4 மணிக்கு
+                Arun-க்கு call பண்ண remind
+                பண்ணு”.
               </span>
             </div>
           ) : (
@@ -319,14 +550,13 @@ export default function Home() {
           )}
         </div>
 
-        {/* CONTROLS */}
         <div className="controls">
 
-          {/* LANGUAGE */}
           <select
             value={language}
             onChange={(e) => {
-              const value = e.target.value;
+              const value =
+                e.target.value;
 
               setLanguage(value);
 
@@ -346,7 +576,6 @@ export default function Home() {
             </option>
           </select>
 
-          {/* TEXT INPUT */}
           <input
             value={text}
             onChange={(e) =>
@@ -357,7 +586,8 @@ export default function Home() {
                 e.key === "Enter" &&
                 text.trim()
               ) {
-                const value = text.trim();
+                const value =
+                  text.trim();
 
                 setText("");
 
@@ -367,7 +597,6 @@ export default function Home() {
             placeholder="Talk to Jorvis..."
           />
 
-          {/* VOICE */}
           <button
             className={
               listening
@@ -381,13 +610,13 @@ export default function Home() {
               : "🎙️"}
           </button>
 
-          {/* SEND */}
           <button
             className="send"
             onClick={() => {
               if (!text.trim()) return;
 
-              const value = text.trim();
+              const value =
+                text.trim();
 
               setText("");
 
@@ -398,10 +627,9 @@ export default function Home() {
           </button>
         </div>
 
-        {/* STATUS */}
         <div className="hint">
           🟢 Offline mode • Local memory •
-          Tamil + English voice
+          Tamil + English • Reminders
         </div>
 
       </section>
