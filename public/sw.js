@@ -1,4 +1,4 @@
-const CACHE_NAME = "jorvis-offline-v1";
+const CACHE_NAME = "jorvis-offline-v2";
 
 const APP_FILES = [
   "/",
